@@ -1,0 +1,23 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+!*.tfvars.example
+
+# Cloud-Init / secrets
+*.pem
+*.key
+*.pub
+*.secret
+
+# VM images
+*.qcow2
+*.raw
+*.img
+
+# Generated files
+*.iso
+*.log
