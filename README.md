@@ -1,5 +1,15 @@
 # Automatisation de VM KVM/libvirt avec Terraform et Cloud-Init
 
+<div align="center">
+
+![Architecture du projet](docs/images/project-architecture.png)
+
+**Terraform + Cloud-Init + libvirt**
+
+*Automatisation du déploiement de VM Ubuntu sur KVM/libvirt*
+
+</div>
+
 ## 1. Présentation du projet
 
 Ce projet a pour objectif d'automatiser le déploiement et la configuration initiale de machines virtuelles sur une infrastructure KVM/libvirt à l'aide de Terraform et Cloud-Init.
