@@ -1,16 +1,20 @@
-resource "libvirt_cloudinit_disk" "ubuntu_init" {
-  name      = "ubuntu-cloud-vm-01-init"
-  user_data = file("${path.module}/../cloud-init/user-data")
-  meta_data = file("${path.module}/../cloud-init/meta-data")
+resource "libvirt_cloudinit_disk" "vm_init" {
+  for_each = local.cloudinit
+
+  name      = "${each.key}-init"
+  user_data = each.value.user_data
+  meta_data = each.value.meta_data
 }
 
-resource "libvirt_volume" "ubuntu_init_volume" {
-  name = "ubuntu-cloud-vm-01-init.iso"
-  pool = "default"
+resource "libvirt_volume" "vm_init_iso" {
+  for_each = local.cloudinit
+
+  name = "${each.key}-init.iso"
+  pool = var.cloudinit_pool
 
   create = {
     content = {
-      url = libvirt_cloudinit_disk.ubuntu_init.path
+      url = libvirt_cloudinit_disk.vm_init[each.key].path
     }
   }
 

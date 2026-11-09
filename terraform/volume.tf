@@ -1,9 +1,9 @@
-resource "libvirt_volume" "ubuntu_os" {
-  name = "ubuntu-cloud-vm-01.qcow2"
-  pool = "default"
+resource "libvirt_volume" "vm_disk_20g" {
+  for_each = local.vms
 
-  capacity      = 10
-  capacity_unit = "GiB"
+  name     = "${each.value.hostname}-20g.qcow2"
+  pool     = var.storage_pool
+  capacity = each.value.disk_gb * 1024 * 1024 * 1024
 
   target = {
     format = {
@@ -11,11 +11,9 @@ resource "libvirt_volume" "ubuntu_os" {
     }
   }
 
-  backing_store = {
-    path = "/var/lib/libvirt/images/base/noble-server-cloudimg-amd64.img"
-
-    format = {
-      type = "qcow2"
+  create = {
+    content = {
+      url = abspath("${path.module}/../images/ubuntu-noble-20g.qcow2")
     }
   }
 }

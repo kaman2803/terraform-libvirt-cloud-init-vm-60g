@@ -1,9 +1,12 @@
-resource "libvirt_domain" "ubuntu_cloud_vm" {
-  name        = "ubuntu-cloud-vm-01"
+resource "libvirt_domain" "vm" {
+  for_each = local.vms
+
+  name        = each.value.hostname
   type        = "kvm"
-  memory      = 2048
+  memory      = each.value.memory
   memory_unit = "MiB"
-  vcpu        = 2
+  vcpu        = each.value.vcpu
+  running     = true
 
   os = {
     type         = "hvm"
@@ -27,7 +30,7 @@ resource "libvirt_domain" "ubuntu_cloud_vm" {
   devices = {
     disks = [
       {
-        # Disque système Ubuntu
+        # Disque système Ubuntu autonome de 20 GiB
         driver = {
           name  = "qemu"
           type  = "qcow2"
@@ -36,7 +39,7 @@ resource "libvirt_domain" "ubuntu_cloud_vm" {
 
         source = {
           file = {
-            file = "/var/lib/libvirt/images/ubuntu-cloud-vm-01.qcow2"
+            file = libvirt_volume.vm_disk_20g[each.key].path
           }
         }
 
@@ -46,12 +49,12 @@ resource "libvirt_domain" "ubuntu_cloud_vm" {
         }
       },
       {
-        # ISO Cloud-Init
+        # ISO Cloud-Init propre à chaque VM
         device = "cdrom"
 
         source = {
           file = {
-            file = "/var/lib/libvirt/images/ubuntu-cloud-vm-01-init.iso"
+            file = libvirt_volume.vm_init_iso[each.key].path
           }
         }
 
@@ -79,7 +82,7 @@ resource "libvirt_domain" "ubuntu_cloud_vm" {
 
         source = {
           network = {
-            network = "default"
+            network = var.network_name
           }
         }
 

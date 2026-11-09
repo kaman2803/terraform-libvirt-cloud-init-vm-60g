@@ -1,1743 +1,623 @@
-# Automatisation de VM KVM/libvirt avec Terraform et Cloud-Init
-
-<div align="center">
-
-![Architecture du projet](docs/images/project-architecture.png)
-
-**Terraform + Cloud-Init + libvirt**
-
-*Automatisation du déploiement de VM Ubuntu sur KVM/libvirt*
-
-</div>
+# Terraform Libvirt Cloud-Init — Déploiement automatisé de machines virtuelles Ubuntu
 
 ## 1. Présentation du projet
 
-Ce projet a pour objectif d'automatiser le déploiement et la configuration initiale d'une machine virtuelle Ubuntu sur une infrastructure KVM/libvirt distante à l'aide de Terraform et Cloud-Init.
+**Terraform Libvirt Cloud-Init** est un projet d'automatisation du déploiement de machines virtuelles Linux sur un hyperviseur KVM/libvirt local.
 
-L'environnement d'administration est `srv01-admin`, une machine virtuelle utilisée pour exécuter Terraform et piloter l'infrastructure distante.
+Il utilise Terraform pour décrire et gérer l'infrastructure sous forme de code (*Infrastructure as Code — IaC*) et Cloud-Init pour automatiser la configuration initiale des systèmes Ubuntu.
 
-L'hôte KVM/libvirt cible est `Kgoumou`.
+Le projet permet de déployer trois machines virtuelles Ubuntu Server 24.04 LTS à partir d'une image Cloud autonome au format QCOW2.
 
-### Architecture générale
+Chaque machine dispose de ses propres ressources :
 
-```text
-Mac M1
-   │
-   │
-   ▼
-srv01-admin
-Ubuntu Server 24.04.5 LTS
-   │
-   │ Terraform
-   │ SSH / Ed25519
-   ▼
-Kgoumou
-Ubuntu 24.04.5 LTS
-KVM / libvirt
-   │
-   ├── ubuntu-cloud-vm-01
-   │      ├── 2 vCPU
-   │      ├── 2048 MiB RAM
-   │      ├── x86_64 / Q35
-   │      ├── vda → QCOW2 / VirtIO
-   │      ├── sda → Cloud-Init ISO
-   │      └── vnet → default / VirtIO
-   │
-   └── Ubuntu Cloud Image
-          └── noble-server-cloudimg-amd64.img
-```
+- 1 vCPU ;
+- 2 Gio de mémoire RAM ;
+- 1 disque système QCOW2 de 20 Gio ;
+- une interface réseau connectée au réseau libvirt `default` ;
+- un utilisateur Linux configuré par Cloud-Init ;
+- une authentification SSH par clé publique.
 
-Le projet a été construit progressivement : chaque étape a été exécutée, validée puis documentée avant de poursuivre.
-
----
+L'ensemble est géré de manière déclarative par Terraform grâce au provider `dmacvicar/libvirt`.
 
 ## 2. Objectifs du projet
 
-Les objectifs sont les suivants :
+Les objectifs principaux sont :
 
-- automatiser le déploiement d'une VM avec Terraform ;
-- utiliser une Ubuntu Cloud Image comme base ;
-- utiliser Cloud-Init pour l'initialisation de la VM ;
-- automatiser la création de l'utilisateur et de la clé SSH ;
-- utiliser KVM/libvirt comme infrastructure de virtualisation ;
-- piloter libvirt à distance depuis `srv01-admin` ;
-- utiliser un backing store QCOW2 ;
-- rendre le déploiement reproductible ;
-- valider le fonctionnement réel de la VM ;
-- documenter les problèmes rencontrés et leurs solutions ;
-- conserver une procédure suffisamment détaillée pour reproduire le projet.
+- Automatiser la création de machines virtuelles KVM.
+- Gérer les ressources libvirt avec Terraform.
+- Utiliser une image Ubuntu Cloud autonome comme source des disques.
+- Préparer des disques QCOW2 de 20 Gio.
+- Automatiser la configuration initiale avec Cloud-Init.
+- Configurer un utilisateur Linux et son accès SSH.
+- Démarrer automatiquement les machines lors de leur gestion par Terraform.
+- Centraliser les paramètres dans un fichier de variables d'environnement.
+- Maintenir la cohérence entre la configuration Terraform et l'infrastructure réelle.
 
----
+## 3. Architecture technique
 
-## 3. Architecture du projet
+### 3.1. Environnement d'exécution
+
+| Composant | Configuration |
+|---|---|
+| Hyperviseur | KVM / QEMU |
+| Gestion de la virtualisation | libvirt |
+| URI libvirt | `qemu:///system` |
+| Système hôte | Ubuntu 24.04.5 LTS |
+| Terraform | 1.17.1 |
+| Provider Terraform | `dmacvicar/libvirt` 0.9.9 |
+| Réseau virtuel | `default` |
+| Type de réseau | NAT |
+| Pool des disques VM | `default` |
+| Pool des ISO Cloud-Init | `iso` |
+| Image source | Ubuntu Noble Server Cloud Image |
+| Format des disques | QCOW2 |
+
+### 3.2. Machines virtuelles déployées
+
+| Paramètre | srv-node1 | srv-node2 | srv-node3 |
+|---|---|---|---|
+| Nom Terraform | `node1` | `node2` | `node3` |
+| Hostname Linux | srv-node1 | srv-node2 | srv-node3 |
+| vCPU | 1 | 1 | 1 |
+| RAM | 2048 Mio | 2048 Mio | 2048 Mio |
+| Disque système | 20 Gio | 20 Gio | 20 Gio |
+| Format | QCOW2 | QCOW2 | QCOW2 |
+| Réseau | default | default | default |
+
+### 3.3. Architecture réseau
+
+Les trois machines virtuelles sont connectées au réseau virtuel libvirt `default`.
+
+Caractéristiques du réseau :
+
+- Type : NAT.
+- Bridge : `virbr0`.
+- Passerelle : `192.168.122.1`.
+- Masque : `/24`.
+- Plage DHCP : `192.168.122.100` à `192.168.122.254`.
+
+Les adresses IP sont attribuées dynamiquement par le serveur DHCP de libvirt.
+
+Pour consulter les baux DHCP :
+
+```bash
+virsh net-dhcp-leases default
+```
+
+Les adresses IP peuvent changer selon les attributions DHCP.
+
+## 4. Structure du projet
+
+L'arborescence actuelle est organisée de la manière suivante :
 
 ```text
-terraform-libvirt-cloud-init-vm-automation/
+terraform-libvirt-cloud-init/
 │
-├── README.md
-├── .gitignore
-│
-├── cloud-init/
-│   ├── meta-data
-│   ├── user-data
-│   └── seed.iso
-│
-├── docs/
-│   └── images/
-│       ├── 12-08-terraform-apply-volume-created.png
-│       ├── 12-09-volume-on-kgoumou.png
-│       ├── 14-05-error-source-volume-permission-denied.png
-│       ├── 15-02-vm-network-ip.png
-│       ├── 15-04-cloud-init-validation.png
-│       └── project-architecture.png
+├── environments/
+│   └── kgoumou/
+│       └── terraform.tfvars
 │
 ├── images/
-│   └── noble-server-cloudimg-amd64.img
+│   └── ubuntu-noble-20g.qcow2
 │
-├── scripts/
+├── templates/
+│   ├── meta-data.yaml.tftpl
+│   └── user-data.yaml.tftpl
 │
-└── terraform/
-    ├── cloudinit.tf
-    ├── domain.tf
-    ├── provider.tf
-    ├── versions.tf
-    └── volume.tf
+├── terraform/
+│   ├── cloudinit.tf
+│   ├── domain.tf
+│   ├── locals.tf
+│   ├── provider.tf
+│   ├── variables.tf
+│   ├── versions.tf
+│   ├── volume_20g.tf
+│   ├── terraform.tfstate
+│   └── terraform.tfstate.backup
+│
+└── README.md
 ```
 
-Les fichiers générés tels que `.terraform/`, les fichiers Terraform State, les ISO et les images de VM sont exclus du dépôt Git avec `.gitignore`.
+### 4.1. Rôle des répertoires
 
----
+| Répertoire | Rôle |
+|---|---|
+| `environments/` | Paramètres propres à chaque environnement |
+| `images/` | Images QCOW2 utilisées pour créer les volumes |
+| `templates/` | Modèles de configuration Cloud-Init |
+| `terraform/` | Configuration Terraform et état local |
 
-# 4. Outils nécessaires à l'automatisation
+### 4.2. Rôle des fichiers Terraform
 
-## 4.1 Environnement d'administration
+**`versions.tf`**
 
-La machine `srv01-admin` dispose notamment de :
+Déclare les contraintes de version de Terraform et les providers nécessaires au projet.
 
-| Outil             | Version |
-| ----------------- | ------: |
-| Terraform         |  1.16.3 |
-| Ansible           |  2.16.3 |
-| Cloud-Init        |    26.1 |
-| OpenSSH           |   9.6p1 |
-| Git               |  2.43.0 |
-| libvirt-clients   |  10.0.0 |
-| virtinst          |   4.1.0 |
-| cloud-image-utils |  0.33-1 |
-| qemu-img          |   8.2.2 |
+**`provider.tf`**
 
-## 4.2 Installation des outils complémentaires
-
-Les outils libvirt et Cloud-Init ont été installés avec :
-
-```bash
-sudo apt update
-sudo apt install -y libvirt-clients virtinst cloud-image-utils
-```
-
-Les commandes suivantes ont ensuite été vérifiées :
-
-```bash
-virsh --version
-virt-install --version
-command -v cloud-localds
-qemu-img --version
-```
-
-Résultats :
-
-```text
-libvirt     : 10.0.0
-virt-install: 4.1.0
-cloud-localds: /usr/bin/cloud-localds
-qemu-img    : 8.2.2
-```
-
-La section 4 est validée.
-
----
-
-# 5. Préparation et initialisation de Terraform
-
-## 5.1 Provider utilisé
-
-Le projet utilise :
-
-```text
-dmacvicar/libvirt
-```
-
-Version :
-
-```text
-0.9.9
-```
-
-Terraform minimal requis :
-
-```text
->= 1.16.0
-```
-
-## 5.2 Configuration
-
-Le fichier `terraform/versions.tf` contient :
-
-```hcl
-terraform {
-  required_providers {
-    libvirt = {
-      source  = "dmacvicar/libvirt"
-      version = "0.9.9"
-    }
-  }
-
-  required_version = ">= 1.16.0"
-}
-```
-
-## 5.3 Initialisation
-
-Depuis `terraform/` :
-
-```bash
-terraform init
-```
-
-Le provider `dmacvicar/libvirt` version `0.9.9` a été installé et verrouillé dans :
-
-```text
-terraform/.terraform.lock.hcl
-```
-
-Validation :
-
-```bash
-terraform providers
-```
-
-Résultat :
-
-```text
-provider[registry.terraform.io/dmacvicar/libvirt] 0.9.9
-```
-
-La section 5 est validée.
-
----
-
-# 6. Environnement cible
-
-## 6.1 Serveur KVM/libvirt
-
-L'hôte cible est :
-
-```text
-Hostname     : Kgoumou
-OS           : Ubuntu 24.04.5 LTS
-Architecture : x86_64
-Kernel       : 7.0.0-34-generic
-libvirt      : 10.0.0
-```
-
-Adresse utilisée par Terraform :
-
-```text
-192.168.122.1
-```
-
-## 6.2 Pools libvirt
-
-Les pools présents sur Kgoumou comprennent notamment :
-
-```text
-centos9
-default
-eve-ng
-ISO
-win-server22
-```
-
-Le projet utilise le pool :
-
-```text
-default
-```
-
-## 6.3 Réseaux libvirt
-
-Les réseaux disponibles comprennent :
-
-```text
-default
-isp2
-```
-
-Le projet utilise :
-
-```text
-default
-```
-
-La section 6 est validée.
-
----
-
-# 7. Architecture de connexion Terraform vers libvirt
-
-Terraform est exécuté depuis `srv01-admin`.
-
-```text
-srv01-admin
-    │
-    │ SSH
-    ▼
-Kgoumou
-192.168.122.1
-    │
-    ▼
-qemu:///system
-    │
-    ▼
-libvirt / QEMU
-```
-
-## 7.1 Validation de libvirt
-
-L'accès au contexte système a été validé avec :
-
-```bash
-virsh -c qemu+ssh://kaman-goumou@192.168.122.1/system list --all
-```
-
-La commande permet de récupérer les machines virtuelles présentes sur Kgoumou.
-
-## 7.2 Droits
-
-Le compte `kaman-goumou` dispose des droits nécessaires pour utiliser libvirt.
-
-Le socket système est associé au groupe `libvirt` :
-
-```text
-/run/libvirt/libvirt-sock
-```
-
-## 7.3 Architecture retenue
-
-La connexion Terraform utilise :
-
-```text
-qemu+ssh://kaman-goumou@192.168.122.1/system
-```
-
-La section 7 est validée.
-
----
-
-# 8. Configuration du provider Terraform
-
-## 8.1 Première configuration
-
-La première configuration était :
+Configure la connexion au service libvirt :
 
 ```hcl
 provider "libvirt" {
-  uri = "qemu+ssh://kaman-goumou@192.168.122.1/system"
+  uri = var.libvirt_uri
 }
 ```
 
-La syntaxe Terraform était valide, mais l'authentification SSH utilisée par le provider a échoué.
+L'utilisation de `qemu:///system` permet de travailler directement avec le service libvirt local.
 
-Erreur rencontrée :
+**`variables.tf`**
 
-```text
-ssh: handshake failed
-no supported methods remain
-```
+Déclare les variables utilisées par le projet :
 
-Une tentative avec `qemu+sshcmd` a également échoué.
+- nom du projet ;
+- URI libvirt ;
+- pools de stockage ;
+- réseau libvirt ;
+- chemin de l'image source ;
+- utilisateur SSH ;
+- clé publique SSH ;
+- configuration des machines virtuelles.
 
-## 8.2 Création d'une clé dédiée
+Une validation contrôle notamment le nombre de vCPU, la mémoire minimale et la capacité minimale des disques.
 
-Afin de séparer l'authentification Terraform des autres clés SSH, une clé dédiée a été créée :
+**`locals.tf`**
 
-```bash
-ssh-keygen -t ed25519 \
-  -f ~/.ssh/terraform_libvirt_ed25519 \
-  -C "terraform-libvirt@srv01-admin"
-```
+Centralise les expressions et les valeurs calculées :
 
-La clé publique a été installée sur Kgoumou :
+- nombre de VM ;
+- noms des VM ;
+- tags communs ;
+- génération des données Cloud-Init à partir des templates.
 
-```bash
-ssh-copy-id \
-  -i ~/.ssh/terraform_libvirt_ed25519.pub \
-  kaman-goumou@192.168.122.1
-```
+**`volume_20g.tf`**
 
-Validation :
+Déclare les volumes QCOW2 de 20 Gio à partir de l'image Ubuntu autonome préparée dans `images/`.
 
-```bash
-ssh \
-  -i ~/.ssh/terraform_libvirt_ed25519 \
-  -o IdentitiesOnly=yes \
-  kaman-goumou@192.168.122.1 \
-  'id && virsh -c qemu:///system uri'
-```
+**`cloudinit.tf`**
 
-## 8.3 Configuration finale
+Déclare les ressources nécessaires à la génération des données Cloud-Init et à leur stockage sous forme d'ISO.
 
-Le fichier `terraform/provider.tf` contient finalement :
+**`domain.tf`**
 
-```hcl
-provider "libvirt" {
-  uri = "qemu+ssh://kaman-goumou@192.168.122.1/system?sshauth=privkey&keyfile=/home/kaman/.ssh/terraform_libvirt_ed25519"
-}
-```
+Déclare les domaines libvirt correspondant aux trois machines virtuelles.
 
-Cette configuration est la configuration de référence du projet.
+Il définit notamment :
 
----
+- le nom de la VM ;
+- le nombre de vCPU ;
+- la mémoire ;
+- le type de machine Q35 ;
+- le disque système VirtIO ;
+- le lecteur CD-ROM Cloud-Init ;
+- la console série ;
+- l'interface réseau VirtIO ;
+- le comportement de fonctionnement de la VM avec `running = true`.
 
-# 9. Préparation de l'image Ubuntu Cloud
+## 5. Préparation de l'image Ubuntu autonome
 
-L'image utilisée est :
+### 5.1. Image Ubuntu source
 
-```text
-noble-server-cloudimg-amd64.img
-```
-
-Elle correspond à l'image Ubuntu 24.04 LTS AMD64.
-
-L'image a été vérifiée comme étant :
+Le projet utilise l'image Ubuntu Cloud suivante :
 
 ```text
-Format       : qcow2
-Virtual size : 3.5 GiB
-Disk size    : environ 597 MiB
-Corrupt      : false
+/home/kaman-goumou/lab/kvm/iso/base/noble-server-cloudimg-amd64.img
 ```
 
-Elle a ensuite été placée directement sur Kgoumou :
+Cette image constitue la base de préparation des disques système.
 
-```text
-/var/lib/libvirt/images/base/noble-server-cloudimg-amd64.img
-```
+### 5.2. Création d'une copie QCOW2 autonome
 
-La lecture par le processus libvirt a été validée :
+Le répertoire `images/` a été créé pour stocker l'image préparée.
+
+La conversion a été réalisée avec :
 
 ```bash
-sudo -u libvirt-qemu \
-  test -r /var/lib/libvirt/images/base/noble-server-cloudimg-amd64.img \
-  && echo "READ_OK"
+qemu-img convert -p -f qcow2 -O qcow2 \
+  /home/kaman-goumou/lab/kvm/iso/base/noble-server-cloudimg-amd64.img \
+  images/ubuntu-noble-20g.qcow2
+```
+
+Cette opération produit une copie autonome au format QCOW2.
+
+### 5.3. Extension à 20 Gio
+
+La commande suivante a été exécutée :
+
+```bash
+qemu-img resize images/ubuntu-noble-20g.qcow2 20G
 ```
 
 Résultat :
 
 ```text
-READ_OK
+Image resized.
 ```
 
-La section 9 est validée.
-
----
-
-# 10. Configuration Cloud-Init
-
-## 10.1 `user-data`
-
-Le fichier `cloud-init/user-data` contient notamment :
-
-```yaml
-#cloud-config
-
-hostname: ubuntu-cloud-vm
-
-users:
-  - name: kaman
-    groups: sudo
-    shell: /bin/bash
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    ssh_authorized_keys:
-      - SSH_PUBLIC_KEY
-
-ssh_pwauth: false
-disable_root: true
-
-package_update: false
-package_upgrade: false
-```
-
-La clé publique a été injectée dans le fichier avant génération du support Cloud-Init.
-
-## 10.2 `meta-data`
-
-```yaml
-instance-id: ubuntu-cloud-vm-01
-local-hostname: ubuntu-cloud-vm
-```
-
-## 10.3 Génération du support Cloud-Init
-
-Le support a été généré avec :
+### 5.4. Vérification de l'image
 
 ```bash
-cloud-localds \
-  cloud-init/seed.iso \
-  cloud-init/user-data \
-  cloud-init/meta-data
+qemu-img info images/ubuntu-noble-20g.qcow2
 ```
 
-Le support obtenu est une ISO `cidata`.
+Caractéristiques vérifiées :
 
-La section 10 est validée.
+- Format : QCOW2.
+- Taille virtuelle : 20 Gio.
+- Taille physique : environ 1,76 Gio.
+- Image non corrompue.
+- Absence de backing file.
 
----
+La distinction entre taille virtuelle et taille physique est importante : les 20 Gio représentent la capacité logique du disque, tandis que l'espace physique occupé dépend des blocs effectivement utilisés.
 
-# 11. Préparation du stockage Terraform
+## 6. Configuration de l'environnement Terraform
 
-## 11.1 Image de base
-
-L'image de base est présente sur Kgoumou :
+Le fichier suivant contient les paramètres propres à l'environnement Kgoumou :
 
 ```text
-/var/lib/libvirt/images/base/noble-server-cloudimg-amd64.img
+environments/kgoumou/terraform.tfvars
 ```
 
-## 11.2 Volume système
-
-Le fichier `terraform/volume.tf` contient la configuration finale :
+Extrait de configuration :
 
 ```hcl
-resource "libvirt_volume" "ubuntu_os" {
-  name = "ubuntu-cloud-vm-01.qcow2"
-  pool = "default"
+project_name    = "terraform-libvirt-cloud-init"
+libvirt_uri     = "qemu:///system"
+storage_pool    = "default"
+cloudinit_pool  = "iso"
+network_name    = "default"
 
-  capacity      = 10
-  capacity_unit = "GiB"
+base_image_path = "/home/kaman-goumou/lab/kvm/iso/base/noble-server-cloudimg-amd64.img"
 
-  target = {
-    format = {
-      type = "qcow2"
-    }
+ssh_username   = "kaman"
+ssh_public_key = "CLE_PUBLIQUE_SSH"
+
+vms = {
+  node1 = {
+    hostname = "srv-node1"
+    vcpu     = 1
+    memory   = 2048
+    disk_gb  = 20
   }
 
-  backing_store = {
-    path = "/var/lib/libvirt/images/base/noble-server-cloudimg-amd64.img"
+  node2 = {
+    hostname = "srv-node2"
+    vcpu     = 1
+    memory   = 2048
+    disk_gb  = 20
+  }
 
-    format = {
-      type = "qcow2"
-    }
+  node3 = {
+    hostname = "srv-node3"
+    vcpu     = 1
+    memory   = 2048
+    disk_gb  = 20
   }
 }
 ```
 
-Architecture :
+La clé publique SSH doit être remplacée par celle de l'environnement cible.
 
-```text
-noble-server-cloudimg-amd64.img
-             │
-             │ backing_store
-             ▼
-ubuntu-cloud-vm-01.qcow2
-             │
-             ▼
-          VM Ubuntu
-```
+Le fichier `terraform.tfvars` contient des paramètres propres à la machine hôte. Il ne doit pas être partagé sans vérification préalable.
 
-Cette configuration est la configuration finale retenue.
+## 7. Configuration Cloud-Init
 
----
+Cloud-Init assure la personnalisation initiale des machines virtuelles lors de leur premier démarrage.
 
-# 12. Création et validation du volume système
+Le projet utilise deux templates :
 
-## 12.1 Première approche
+- `templates/meta-data.yaml.tftpl`
+- `templates/user-data.yaml.tftpl`
 
-Une première approche utilisait `create.content.url`.
+### 7.1. Meta-data
 
-Elle a échoué lorsque le fichier source était situé sur Kgoumou :
+Le fichier `meta-data.yaml.tftpl` permet de transmettre notamment :
 
-```text
-Could not open URL for upload:
-failed to stat file:
-No such file or directory
-```
+- l'identifiant de l'instance ;
+- le hostname de la machine.
 
-La cause était liée au fait que le chemin était évalué depuis `srv01-admin`.
+Les valeurs sont générées à partir de la configuration de chaque VM.
 
-## 12.2 Utilisation du backing store
+### 7.2. User-data
 
-La solution retenue a été l'utilisation de :
+Le fichier `user-data.yaml.tftpl` définit notamment :
 
-```hcl
-backing_store = {
-  path = "/var/lib/libvirt/images/base/noble-server-cloudimg-amd64.img"
+- la création de l'utilisateur Linux ;
+- les privilèges sudo ;
+- le shell utilisé ;
+- la clé publique SSH autorisée ;
+- la désactivation de l'authentification SSH par mot de passe ;
+- la désactivation de la connexion directe de root.
 
-  format = {
-    type = "qcow2"
-  }
-}
-```
+L'utilisateur configuré est `kaman`.
 
-Une première tentative a produit :
+### 7.3. Génération des ISO Cloud-Init
 
-```text
-Error: Missing Capacity
+Terraform utilise les données calculées dans `locals.tf` pour générer les ressources Cloud-Init.
 
-Volume capacity is required when not uploading from a URL
-```
+Chaque machine dispose de ses propres données et de son propre volume ISO.
 
-La capacité a donc été ajoutée :
+Les fichiers ISO sont stockés dans le pool libvirt `iso`.
 
-```hcl
-capacity      = 10
-capacity_unit = "GiB"
-```
+## 8. Déploiement de l'infrastructure
 
-## 12.3 Création
+### 8.1. Initialisation Terraform
+
+Depuis le répertoire du projet :
 
 ```bash
-terraform apply
+terraform -chdir=terraform init
 ```
 
-Résultat :
+Cette commande initialise le répertoire Terraform et télécharge les providers nécessaires.
 
-```text
-libvirt_volume.ubuntu_os:
-Creation complete
-
-Apply complete!
-Resources: 1 added, 0 changed, 0 destroyed.
-```
-
-Le volume créé est :
-
-```text
-/var/lib/libvirt/images/ubuntu-cloud-vm-01.qcow2
-```
-
-La section 12 est validée.
-
-![Création du volume avec Terraform](docs/images/12-08-terraform-apply-volume-created.png)
-
-![Volume présent sur Kgoumou](docs/images/12-09-volume-on-kgoumou.png)
-
----
-
-# 13. Préparation de la VM
-
-## 13.1 Ressource Cloud-Init
-
-Le fichier `terraform/cloudinit.tf` contient :
-
-```hcl
-resource "libvirt_cloudinit_disk" "ubuntu_init" {
-  name      = "ubuntu-cloud-vm-01-init"
-  user_data = file("${path.module}/../cloud-init/user-data")
-  meta_data = file("${path.module}/../cloud-init/meta-data")
-}
-```
-
-## 13.2 Volume ISO persistant
-
-Afin d'éviter un fichier Cloud-Init temporaire dans `/tmp`, un volume ISO persistant est utilisé :
-
-```hcl
-resource "libvirt_volume" "ubuntu_init_volume" {
-  name = "ubuntu-cloud-vm-01-init.iso"
-  pool = "default"
-
-  create = {
-    content = {
-      url = libvirt_cloudinit_disk.ubuntu_init.path
-    }
-  }
-
-  target = {
-    format = {
-      type = "iso"
-    }
-  }
-}
-```
-
-## 13.3 Validation Terraform
+### 8.2. Formatage des fichiers
 
 ```bash
-terraform fmt
-terraform validate
-terraform plan
+terraform -chdir=terraform fmt
 ```
 
-Résultats :
+Cette commande applique le formatage standard des fichiers HCL.
 
-```text
-terraform fmt       : OK
-terraform validate  : Success! The configuration is valid.
-terraform plan      : OK
-```
-
-La préparation de la VM était validée avant le déploiement réel.
-
----
-
-# 14. Déploiement réel de la VM et résolution des problèmes
-
-## 14.1 Objectif
-
-Cette section documente le déploiement réel ainsi que les problèmes rencontrés pendant les différentes tentatives.
-
-Configuration cible :
-
-```text
-VM           : ubuntu-cloud-vm-01
-vCPU         : 2
-RAM          : 2048 MiB
-Architecture : x86_64
-Machine      : Q35
-Disque       : QCOW2 / VirtIO
-Cloud-Init   : ISO persistante
-Réseau       : default / VirtIO
-```
-
-## 14.2 Premier déploiement
-
-Le premier `terraform apply` a créé :
-
-```text
-libvirt_cloudinit_disk.ubuntu_init
-libvirt_domain.ubuntu_cloud_vm
-libvirt_volume.ubuntu_base
-```
-
-## 14.3 Problème Cloud-Init temporaire
-
-Lors du démarrage :
-
-```text
-Cannot access storage file
-'/tmp/terraform-provider-libvirt-cloudinit/cloudinit-b2c3d140e9346731.iso':
-No such file or directory
-```
-
-La solution a été de créer un volume Cloud-Init persistant dans le pool libvirt `default`.
-
-## 14.4 Problème de capacité
-
-Lors de la création du volume avec `backing_store` :
-
-```text
-Error: Missing Capacity
-```
-
-La capacité de `10 GiB` a été ajoutée.
-
-## 14.5 Problème de permissions
-
-Le démarrage a ensuite rencontré :
-
-```text
-Could not open
-'/var/lib/libvirt/images/ubuntu-cloud-vm-01.qcow2':
-Permission denied
-```
-
-Les permissions et la lisibilité par `libvirt-qemu` ont été vérifiées.
-
-Une modification du volume existant a produit :
-
-```text
-Error: Update Not Supported
-
-Storage volumes cannot be updated.
-All changes require replacement.
-```
-
-Le volume a donc été retiré de l'état Terraform puis supprimé et recréé.
-
-## 14.6 Comparaison avec une VM fonctionnelle
-
-Une VM fonctionnelle utilisant une source fichier a été comparée à la configuration précédente utilisant `source.volume`.
-
-Cette comparaison a conduit à retenir une architecture plus simple utilisant directement :
-
-```text
-source file
-```
-
-pour le disque système.
-
-## 14.7 Vérification AppArmor et DAC
-
-Les labels dynamiques suivants ont été ajoutés :
-
-```hcl
-sec_label = [
-  {
-    type    = "dynamic"
-    model   = "apparmor"
-    relabel = "yes"
-  },
-  {
-    type    = "dynamic"
-    model   = "dac"
-    relabel = "yes"
-  }
-]
-```
-
-Les journaux du noyau et d'AppArmor ont ensuite été vérifiés.
-
-Aucun refus AppArmor correspondant au problème n'a été identifié.
-
-## 14.8 Repartir sur une base saine
-
-Les anciennes ressources de test ont été supprimées afin de repartir d'un environnement propre.
-
-Les anciens domaines et volumes ont été supprimés puis l'état Terraform a été nettoyé.
-
-La nouvelle architecture a ensuite été reconstruite.
-
-## 14.9 Architecture finale du stockage
-
-L'image Ubuntu Cloud est conservée sur Kgoumou :
-
-```text
-/var/lib/libvirt/images/base/noble-server-cloudimg-amd64.img
-```
-
-Terraform crée :
-
-```text
-ubuntu-cloud-vm-01.qcow2
-```
-
-à partir de cette image avec `backing_store`.
-
-## 14.10 Déploiement propre
-
-Le plan indiquait :
-
-```text
-Plan: 4 to add, 0 to change, 0 to destroy.
-```
-
-Les quatre ressources étaient :
-
-```text
-libvirt_cloudinit_disk.ubuntu_init
-libvirt_volume.ubuntu_os
-libvirt_volume.ubuntu_init_volume
-libvirt_domain.ubuntu_cloud_vm
-```
-
-Le déploiement :
+### 8.3. Validation de la configuration
 
 ```bash
-terraform apply
+terraform -chdir=terraform validate
 ```
 
-a produit :
+Elle vérifie la cohérence syntaxique et structurelle de la configuration Terraform.
 
-```text
-libvirt_cloudinit_disk.ubuntu_init:
-Creation complete
-
-libvirt_volume.ubuntu_os:
-Creation complete
-
-libvirt_volume.ubuntu_init_volume:
-Creation complete
-
-libvirt_domain.ubuntu_cloud_vm:
-Creation complete
-
-Apply complete!
-Resources: 4 added, 0 changed, 0 destroyed.
-```
-
-## 14.11 Console série
-
-Une console série a été ajoutée pour faciliter les diagnostics :
-
-```hcl
-consoles = [
-  {
-    type = "pty"
-
-    target = {
-      type = "serial"
-      port = 0
-    }
-  }
-]
-```
-
-Le XML libvirt confirmait la présence de la console série.
-
-## 14.12 Problème de format du disque
-
-L'inspection du XML a révélé :
-
-```xml
-<driver name='qemu' type='raw'/>
-```
-
-alors que le disque :
-
-```text
-/var/lib/libvirt/images/ubuntu-cloud-vm-01.qcow2
-```
-
-était une image QCOW2.
-
-L'analyse a également montré que le bloc `driver` avait été placé sur le CD-ROM Cloud-Init au lieu du disque système.
-
-## 14.13 Correction du driver
-
-Le bloc correct a été placé sur le disque système :
-
-```hcl
-driver = {
-  name  = "qemu"
-  type  = "qcow2"
-  cache = "none"
-}
-```
-
-Le disque utilise :
-
-```text
-vda
-VirtIO
-QCOW2
-cache=none
-```
-
-Le CD-ROM Cloud-Init reste séparé.
-
-## 14.14 Validation du XML final
-
-Le XML final contient :
-
-```xml
-<disk type='file' device='disk'>
-  <driver name='qemu' type='qcow2' cache='none'/>
-  <source file='/var/lib/libvirt/images/ubuntu-cloud-vm-01.qcow2'/>
-  <target dev='vda' bus='virtio'/>
-</disk>
-```
-
-Cette configuration correspond exactement au `domain.tf` final.
-
-Le CD-ROM Cloud-Init est :
-
-```xml
-<disk type='file' device='cdrom'>
-  <driver name='qemu' type='raw'/>
-  <source file='/var/lib/libvirt/images/ubuntu-cloud-vm-01-init.iso'/>
-</disk>
-```
-
-Le `raw` du CD-ROM est normal et ne concerne pas le disque système.
-
-## 14.15 Démarrage final
-
-La VM a finalement démarré avec succès :
-
-```text
-Domain 'ubuntu-cloud-vm-01' started
-running
-```
-
-## 14.16 Bilan
-
-Architecture finale :
-
-```text
-Terraform
-    │
-    ▼
-libvirt provider 0.9.9
-    │
-    ▼
-Kgoumou / libvirt
-    │
-    ├── ubuntu-cloud-vm-01
-    │      ├── 2 vCPU
-    │      ├── 2048 MiB RAM
-    │      ├── x86_64 / Q35
-    │      ├── vda → QCOW2 / VirtIO
-    │      ├── sda → Cloud-Init ISO
-    │      └── vnet → default / VirtIO
-    │
-    └── backing store
-           └── noble-server-cloudimg-amd64.img
-```
-
-Validations :
-
-```text
-Terraform Apply        : OK
-Volume système         : OK
-Backing store          : OK
-Cloud-Init volume      : OK
-Disque QCOW2           : OK
-Driver QEMU            : OK
-VirtIO                 : OK
-Console série          : OK
-Démarrage VM           : OK
-État VM                : running
-```
-
-![Problème rencontré avec la source du volume](docs/images/14-05-error-source-volume-permission-denied.png)
-
-La section 14 est validée.
-
----
-
-# 15. Validation de Cloud-Init, SSH et du réseau
-
-## 15.1 État de la VM
-
-La VM finale :
-
-```text
-Nom       : ubuntu-cloud-vm-01
-État      : running
-Interface : vnet2
-Réseau    : default
-Modèle    : virtio
-MAC       : 52:54:00:4f:f7:ee
-IPv4      : 192.168.122.193/24
-```
-
-![Validation de l'adresse IP et de l'interface réseau de la VM](docs/images/15-02-vm-network-ip.png)
-
-## 15.2 Accès SSH à Kgoumou
-
-La clé Terraform a été chargée dans un `ssh-agent` :
+### 8.4. Prévisualisation du déploiement
 
 ```bash
-eval "$(ssh-agent -s)"
-ssh-add ~/.ssh/terraform_libvirt_ed25519
+terraform -chdir=terraform plan \
+  -var-file=../environments/kgoumou/terraform.tfvars
 ```
 
-La connexion vers Kgoumou fonctionne ensuite avec :
+Cette commande compare la configuration déclarée à l'infrastructure existante et présente les actions proposées.
+
+### 8.5. Application de la configuration
 
 ```bash
-ssh kaman-goumou@192.168.122.1
+terraform -chdir=terraform apply \
+  -var-file=../environments/kgoumou/terraform.tfvars
 ```
 
-## 15.3 Connexion SSH à la VM
+Terraform crée ou met à jour les ressources nécessaires après confirmation.
 
-La VM est accessible avec :
+Le déploiement réalisé dans ce projet a créé :
+
+- 3 volumes QCOW2 de 20 Gio ;
+- 3 ressources Cloud-Init ;
+- 3 volumes ISO Cloud-Init ;
+- 3 domaines libvirt.
+
+Le démarrage des domaines est demandé par `running = true`.
+
+## 9. Vérification des machines virtuelles
+
+### 9.1. Liste des machines virtuelles
 
 ```bash
-ssh kaman@192.168.122.193
+virsh list --all
 ```
 
-## 15.4 Validation de l'utilisateur
+Cette commande permet de consulter les domaines libvirt et leur état.
+
+### 9.2. Vérification des informations d'une VM
+
+Exemple :
 
 ```bash
-id
+virsh dominfo srv-node1
 ```
 
-Résultat :
+Cette commande permet de consulter les caractéristiques du domaine.
 
-```text
-uid=1000(kaman)
-gid=1000(kaman)
-groups=1000(kaman),27(sudo)
-```
-
-Cloud-Init a donc créé l'utilisateur `kaman` avec les privilèges `sudo`.
-
-## 15.5 Hostname
+### 9.3. Vérification des adresses IP
 
 ```bash
-hostname
+virsh net-dhcp-leases default
 ```
 
-Résultat :
+Cette commande affiche les baux DHCP attribués sur le réseau `default`.
 
-```text
-ubuntu-cloud-vm
-```
-
-## 15.6 État de Cloud-Init
+Pour consulter l'adresse détectée d'une VM :
 
 ```bash
-cloud-init status --long
+virsh domifaddr srv-node1
 ```
 
-Résultat :
-
-```text
-status: done
-extended_status: done
-detail: DataSourceNoCloud [seed=/dev/sr0]
-errors: []
-recoverable_errors: {}
-```
-
-Cloud-Init a donc terminé son traitement sans erreur.
-
-![Validation de l'utilisateur, du hostname et de Cloud-Init](docs/images/15-04-cloud-init-validation.png)
-
-## 15.7 Interface réseau
+### 9.4. Vérification du stockage
 
 ```bash
-ip -br addr
+virsh vol-list default
 ```
 
-Résultat :
+Cette commande permet de vérifier la présence des disques virtuels dans le pool de stockage.
 
-```text
-enp1s0 UP 192.168.122.193/24
-```
-
-## 15.8 Route par défaut
+Pour examiner les caractéristiques d'un disque :
 
 ```bash
-ip route
+qemu-img info /var/lib/libvirt/images/srv-node1-20g.qcow2
 ```
 
-Résultat :
+## 10. Accès SSH aux machines virtuelles
 
-```text
-default via 192.168.122.1 dev enp1s0
-```
+L'accès SSH est configuré par Cloud-Init à partir de la clé publique déclarée dans les variables Terraform.
 
-## 15.9 DNS
+Depuis la machine cliente :
 
 ```bash
-resolvectl status
+ssh kaman@ADRESSE_IP
 ```
 
-Serveur DNS :
-
-```text
-192.168.122.1
-```
-
-## 15.10 Connectivité vers la passerelle
+Exemple correspondant à la validation réalisée pour `srv-node1` :
 
 ```bash
-ping -c 3 192.168.122.1
+ssh kaman@192.168.122.209
 ```
 
-Résultat :
+L'adresse IP est attribuée dynamiquement : il faut vérifier le bail DHCP avant de réutiliser cet exemple.
 
-```text
-3 packets transmitted
-3 received
-0% packet loss
-```
+## 11. Validation du système invité
 
-Latence moyenne :
+Après connexion SSH, les commandes suivantes permettent de contrôler le système.
 
-```text
-0.293 ms
-```
-
-## 15.11 Connectivité Internet
+### 11.1. Vérification du hostname et du système
 
 ```bash
-ping -c 3 8.8.8.8
+hostnamectl
 ```
 
-Résultat :
+La validation de `srv-node1` a confirmé :
+
+- hostname : `srv-node1` ;
+- système : Ubuntu 24.04.5 LTS ;
+- virtualisation : KVM ;
+- architecture : x86-64.
+
+### 11.2. Vérification des disques
+
+```bash
+lsblk
+```
+
+Cette commande affiche les périphériques de stockage et leurs partitions.
+
+La vérification réalisée sur `srv-node1` a montré :
+
+- disque système `vda` : 20 Gio ;
+- partition racine `vda1` : environ 19 Gio ;
+- partition EFI `vda15` ;
+- partition `/boot` `vda16`.
+
+### 11.3. Vérification de l'espace disponible
+
+```bash
+df -h /
+```
+
+Résultat observé sur `srv-node1` :
 
 ```text
-3 packets transmitted
-3 received
-0% packet loss
+Filesystem      Size  Used  Avail  Use%
+/dev/vda1        19G  1.7G    17G    9%
 ```
 
-Latence moyenne :
+Cette vérification confirme que la partition racine utilise l'espace disponible du disque de 20 Gio.
+
+## 12. Gestion du cycle de vie avec Terraform
+
+Terraform permet de maintenir les machines virtuelles dans l'état déclaré dans les fichiers de configuration.
+
+### 12.1. Vérification des ressources suivies
+
+```bash
+terraform -chdir=terraform state list
+```
+
+Cette commande affiche les ressources actuellement suivies dans l'état Terraform.
+
+### 12.2. Vérification des changements
+
+```bash
+terraform -chdir=terraform plan \
+  -var-file=../environments/kgoumou/terraform.tfvars
+```
+
+Lorsque l'infrastructure correspond à la configuration, Terraform affiche :
 
 ```text
-87.510 ms
+No changes. Your infrastructure matches the configuration.
 ```
 
-## 15.12 Bilan de la validation
+### 12.3. Gestion de l'état de fonctionnement
 
-```text
-VM running                    : OK
-DHCP libvirt                  : OK
-IPv4                          : 192.168.122.193/24
-Interface VM                  : enp1s0
-Interface libvirt             : vnet2
-MAC                           : 52:54:00:4f:f7:ee
-Passerelle                    : 192.168.122.1
-DNS                           : 192.168.122.1
-Utilisateur kaman             : OK
-Groupe sudo                   : OK
-Hostname                      : ubuntu-cloud-vm
-SSH par clé                   : OK
-Cloud-Init                    : done
-Datasource                    : DataSourceNoCloud
-Cloud-Init errors             : aucune
-Ping passerelle               : OK
-Ping Internet                 : OK
-```
-
-La chaîne d'initialisation est donc validée :
-
-```text
-Terraform
-    │
-    ▼
-libvirt
-    │
-    ▼
-VM Ubuntu
-    │
-    ├── DHCP
-    │     └── 192.168.122.193
-    │
-    ├── Cloud-Init
-    │     ├── hostname
-    │     ├── utilisateur kaman
-    │     ├── sudo
-    │     └── clé SSH
-    │
-    └── Réseau
-          ├── Gateway
-          ├── DNS
-          └── Internet
-```
-
-**Section 15 validée.**
-
----
-
-# 16. Problèmes rencontrés et solutions
-
-Cette section synthétise les principaux problèmes rencontrés pendant la construction du projet.
-
-## 16.1 Authentification Terraform → libvirt
-
-### Problème
-
-Le provider libvirt ne pouvait pas s'authentifier correctement avec la configuration SSH initiale.
-
-### Solution
-
-Création d'une clé dédiée :
-
-```text
-~/.ssh/terraform_libvirt_ed25519
-```
-
-et utilisation explicite de cette clé dans `provider.tf`.
-
----
-
-## 16.2 Source locale inaccessible depuis Kgoumou
-
-### Problème
-
-L'utilisation de `create.content.url` avec un fichier situé sur Kgoumou provoquait :
-
-```text
-failed to stat file
-No such file or directory
-```
-
-### Cause
-
-Le chemin était évalué depuis l'environnement où Terraform était exécuté.
-
-### Solution
-
-Utilisation d'un `backing_store` pointant vers une image déjà présente sur Kgoumou.
-
----
-
-## 16.3 Capacité manquante avec `backing_store`
-
-### Problème
-
-```text
-Error: Missing Capacity
-```
-
-### Solution
-
-Ajout :
+Dans `domain.tf`, la propriété :
 
 ```hcl
-capacity      = 10
-capacity_unit = "GiB"
+running = true
 ```
 
----
+indique que Terraform doit maintenir le domaine en fonctionnement.
 
-## 16.4 ISO Cloud-Init temporaire
+Si une VM est arrêtée manuellement, une prochaine opération Terraform peut détecter cette différence et demander son redémarrage.
 
-### Problème
+Cette propriété ne doit pas être confondue avec l'option d'autostart de libvirt au démarrage de l'hôte.
 
-Libvirt tentait d'utiliser :
+## 13. Nettoyage des anciennes ressources
+
+Au cours de l'évolution du projet, les premiers volumes QCOW2 ont été remplacés par des volumes autonomes de 20 Gio.
+
+Les anciennes ressources `libvirt_volume.vm_disk` ont été retirées de la configuration et supprimées avec Terraform.
+
+Les nouveaux volumes sont déclarés dans :
 
 ```text
-/tmp/terraform-provider-libvirt-cloudinit/
+terraform/volume_20g.tf
 ```
 
-Le fichier n'était plus disponible au démarrage de la VM.
-
-### Solution
-
-Création d'un volume ISO Cloud-Init persistant dans le pool `default`.
-
----
-
-## 16.5 Permissions du volume
-
-### Problème
+Les anciennes ressources ont été supprimées avec succès :
 
 ```text
-Permission denied
+Apply complete! Resources: 0 added, 0 changed, 3 destroyed.
 ```
 
-sur le disque QCOW2.
+La vérification du pool `default` a confirmé la présence des trois nouveaux disques et la disparition des anciens.
 
-### Analyse
+Le nettoyage a également supprimé les anciennes configurations mono-VM et les anciens fichiers Cloud-Init devenus inutiles.
 
-Les permissions, le propriétaire, le groupe, l'accès `libvirt-qemu`, AppArmor et DAC ont été vérifiés.
+## 14. Bonnes pratiques
 
-### Solution
+- Toujours exécuter `terraform plan` avant `terraform apply`.
+- Ne jamais supprimer manuellement un disque encore géré par Terraform.
+- Vérifier les dépendances avant de supprimer un fichier `.tf`.
+- Conserver une sauvegarde de l'état Terraform avant une opération importante.
+- Ne pas supprimer le fichier `terraform.tfstate` pendant que l'infrastructure est gérée par Terraform.
+- Ne pas partager les fichiers contenant des paramètres sensibles.
+- Vérifier les adresses DHCP avant les connexions SSH.
+- Contrôler les disques et les domaines libvirt après chaque opération importante.
+- Conserver une séparation claire entre les fichiers Terraform, les variables d'environnement et les templates Cloud-Init.
 
-Nettoyage de l'environnement et adoption d'une architecture de stockage plus simple avec source fichier.
+## 15. État actuel du projet
+
+Le projet a abouti au déploiement de trois machines virtuelles Ubuntu Server sur KVM/libvirt.
+
+| Élément | État |
+|---|---|
+| Configuration Terraform | Opérationnelle |
+| Provider libvirt | Configuré |
+| Image Ubuntu autonome 20 Gio | Préparée |
+| Volumes QCOW2 | 3 créés |
+| Configuration Cloud-Init | Déployée |
+| ISO Cloud-Init | 3 créés |
+| Domaines libvirt | 3 créés |
+| Démarrage Terraform | Configuré |
+| Accès SSH de srv-node1 | Validé |
+| Vérification du système de srv-node1 | Validée |
+| Nettoyage des anciens volumes | Terminé |
+| Cohérence Terraform | Validée |
+
+**Remarque sur les validations :** `srv-node1` a fait l'objet des contrôles détaillés SSH, hostname, système et stockage. Les vérifications équivalentes de `srv-node2` et `srv-node3` restent à documenter individuellement.
+
+## 16. Conclusion
+
+Ce projet met en pratique l'automatisation d'une infrastructure de virtualisation locale avec Terraform, KVM, QEMU, libvirt et Cloud-Init.
+
+Il illustre la gestion déclarative des ressources, la préparation des images système, la création des disques virtuels, la personnalisation des machines et le contrôle de leur cycle de vie.
+
+Il constitue une base pour des évolutions futures telles que :
+
+- l'automatisation de la configuration système avec Ansible ;
+- le déploiement de services Linux ;
+- la mise en place de clusters ;
+- la supervision des machines virtuelles ;
+- l'intégration dans une chaîne d'automatisation Infrastructure as Code.
 
 ---
 
-## 16.6 `source.volume` versus `source.file`
-
-### Problème
-
-Une configuration utilisant :
-
-```text
-source.volume
-```
-
-présentait des difficultés au démarrage du domaine.
-
-### Analyse
-
-Une VM fonctionnelle utilisant une source fichier a été comparée à la configuration Terraform.
-
-### Solution retenue
-
-Le domaine final utilise :
-
-```hcl
-source = {
-  file = {
-    file = "/var/lib/libvirt/images/ubuntu-cloud-vm-01.qcow2"
-  }
-}
-```
-
-Cette architecture a été validée avec succès.
-
----
-
-## 16.7 AppArmor et DAC
-
-### Problème
-
-Les permissions du disque semblaient initialement pouvoir être liées aux mécanismes de sécurité libvirt.
-
-### Action
-
-Les labels dynamiques suivants ont été ajoutés :
-
-```hcl
-sec_label = [
-  {
-    type    = "dynamic"
-    model   = "apparmor"
-    relabel = "yes"
-  },
-  {
-    type    = "dynamic"
-    model   = "dac"
-    relabel = "yes"
-  }
-]
-```
-
-Les journaux ont ensuite été vérifiés.
-
-Aucun refus AppArmor correspondant au problème n'a été trouvé.
-
----
-
-## 16.8 Mauvais format du disque système
-
-### Problème
-
-Le XML indiquait :
-
-```xml
-<driver name='qemu' type='raw'/>
-```
-
-pour un fichier QCOW2.
-
-### Cause
-
-Le bloc `driver` avait initialement été placé sur le mauvais disque.
-
-### Solution
-
-Le driver a été déplacé sur le disque système :
-
-```hcl
-driver = {
-  name  = "qemu"
-  type  = "qcow2"
-  cache = "none"
-}
-```
-
-Le XML final confirme :
-
-```xml
-<driver name='qemu' type='qcow2' cache='none'/>
-```
-
----
-
-## 16.9 Besoin d'un diagnostic de démarrage
-
-### Problème
-
-Le démarrage de la VM devait pouvoir être observé plus facilement.
-
-### Solution
-
-Ajout d'une console série :
-
-```hcl
-consoles = [
-  {
-    type = "pty"
-
-    target = {
-      type = "serial"
-      port = 0
-    }
-  }
-]
-```
-
----
-
-## 16.10 Validation finale
-
-Après les corrections, la chaîne complète a été validée :
-
-```text
-Terraform
-    │
-    ▼
-Provider libvirt 0.9.9
-    │
-    │ SSH / clé dédiée
-    ▼
-Kgoumou
-    │
-    ▼
-libvirt / QEMU
-    │
-    ▼
-ubuntu-cloud-vm-01
-    │
-    ├── QCOW2
-    ├── VirtIO
-    ├── Cloud-Init
-    ├── SSH
-    └── Réseau
-```
-
-Résultat final :
-
-```text
-Terraform             : OK
-libvirt                : OK
-VM                     : running
-Cloud-Init             : done
-SSH                    : OK
-Utilisateur            : OK
-Réseau                 : OK
-Internet               : OK
-```
-
----
-
-# 17. Configuration Terraform finale de référence
-
-Cette section rassemble les fichiers Terraform réellement retenus.
-
-## 17.1 `provider.tf`
-
-```hcl
-provider "libvirt" {
-  uri = "qemu+ssh://kaman-goumou@192.168.122.1/system?sshauth=privkey&keyfile=/home/kaman/.ssh/terraform_libvirt_ed25519"
-}
-```
-
-## 17.2 `versions.tf`
-
-```hcl
-terraform {
-  required_providers {
-    libvirt = {
-      source  = "dmacvicar/libvirt"
-      version = "0.9.9"
-    }
-  }
-
-  required_version = ">= 1.16.0"
-}
-```
-
-## 17.3 `volume.tf`
-
-```hcl
-resource "libvirt_volume" "ubuntu_os" {
-  name = "ubuntu-cloud-vm-01.qcow2"
-  pool = "default"
-
-  capacity      = 10
-  capacity_unit = "GiB"
-
-  target = {
-    format = {
-      type = "qcow2"
-    }
-  }
-
-  backing_store = {
-    path = "/var/lib/libvirt/images/base/noble-server-cloudimg-amd64.img"
-
-    format = {
-      type = "qcow2"
-    }
-  }
-}
-```
-
-## 17.4 `cloudinit.tf`
-
-```hcl
-resource "libvirt_cloudinit_disk" "ubuntu_init" {
-  name      = "ubuntu-cloud-vm-01-init"
-  user_data = file("${path.module}/../cloud-init/user-data")
-  meta_data = file("${path.module}/../cloud-init/meta-data")
-}
-
-resource "libvirt_volume" "ubuntu_init_volume" {
-  name = "ubuntu-cloud-vm-01-init.iso"
-  pool = "default"
-
-  create = {
-    content = {
-      url = libvirt_cloudinit_disk.ubuntu_init.path
-    }
-  }
-
-  target = {
-    format = {
-      type = "iso"
-    }
-  }
-}
-```
-
-## 17.5 `domain.tf`
-
-```hcl
-resource "libvirt_domain" "ubuntu_cloud_vm" {
-  name        = "ubuntu-cloud-vm-01"
-  type        = "kvm"
-  memory      = 2048
-  memory_unit = "MiB"
-  vcpu        = 2
-
-  os = {
-    type         = "hvm"
-    type_arch    = "x86_64"
-    type_machine = "q35"
-  }
-
-  sec_label = [
-    {
-      type    = "dynamic"
-      model   = "apparmor"
-      relabel = "yes"
-    },
-    {
-      type    = "dynamic"
-      model   = "dac"
-      relabel = "yes"
-    }
-  ]
-
-  devices = {
-    disks = [
-      {
-        driver = {
-          name  = "qemu"
-          type  = "qcow2"
-          cache = "none"
-        }
-
-        source = {
-          file = {
-            file = "/var/lib/libvirt/images/ubuntu-cloud-vm-01.qcow2"
-          }
-        }
-
-        target = {
-          dev = "vda"
-          bus = "virtio"
-        }
-      },
-      {
-        device = "cdrom"
-
-        source = {
-          file = {
-            file = "/var/lib/libvirt/images/ubuntu-cloud-vm-01-init.iso"
-          }
-        }
-
-        target = {
-          dev = "sda"
-          bus = "sata"
-        }
-      }
-    ]
-
-    consoles = [
-      {
-        type = "pty"
-
-        target = {
-          type = "serial"
-          port = 0
-        }
-      }
-    ]
-
-    interfaces = [
-      {
-        type = "network"
-
-        source = {
-          network = {
-            network = "default"
-          }
-        }
-
-        model = {
-          type = "virtio"
-        }
-      }
-    ]
-  }
-}
-```
-
----
-
-# 18. État final du projet
-
-La configuration finale permet d'obtenir automatiquement :
-
-```text
-Ubuntu Cloud Image
-        │
-        ▼
-Backing Store
-        │
-        ▼
-QCOW2 10 GiB
-        │
-        ▼
-VM KVM/libvirt
-        │
-        ├── 2 vCPU
-        ├── 2 GiB RAM
-        ├── Q35
-        ├── VirtIO
-        ├── Cloud-Init
-        ├── SSH
-        └── réseau libvirt
-```
-
-La VM finale est fonctionnelle et a été validée avec :
-
-```text
-IP VM       : 192.168.122.193
-Gateway     : 192.168.122.1
-DNS         : 192.168.122.1
-Hostname    : ubuntu-cloud-vm
-Utilisateur : kaman
-Cloud-Init  : done
-SSH         : OK
-Internet    : OK
-```
-
----
-
-# 19. Git et publication du projet
-
-Le projet est versionné avec Git.
-
-Les fichiers générés et sensibles sont exclus par `.gitignore`, notamment :
-
-```text
-.terraform/
-*.tfstate
-*.tfstate.*
-*.iso
-*.img
-*.qcow2
-```
-
-Le dépôt distant utilise une authentification SSH dédiée à GitHub.
-
-Le dépôt est publié sur :
-
-```text
-github.com/kaman2803/terraform-libvirt-cloud-init-vm-automation
-```
-
-La branche principale est :
-
-```text
-main
-```
-
----
-
-# 20. Perspectives d'évolution
-
-Les prochaines évolutions prévues sont notamment :
-
-- création d'un script de déploiement automatisé dans `scripts/` ;
-- validation de l'idempotence avec `terraform plan` ;
-- possibilité de paramétrer le nom de VM, CPU, mémoire et réseau ;
-- amélioration de la reproductibilité ;
-- ajout éventuel d'autres Cloud Images ;
-- automatisation complète du cycle de création et de destruction.
-
----
-
-**KG-Lab**
+**Projet :** Terraform Libvirt Cloud-Init  
+**Plateforme :** KVM / QEMU / libvirt  
+**Automatisation :** Terraform  
+**Initialisation des VM :** Cloud-Init  
+**Système invité :** Ubuntu Server 24.04 LTS
