@@ -1,7 +1,7 @@
-resource "libvirt_volume" "vm_disk_20g" {
+resource "libvirt_volume" "vm_disk_60g" {
   for_each = local.vms
 
-  name     = "${each.value.hostname}-20g.qcow2"
+  name     = "${each.value.hostname}.qcow2"
   pool     = var.storage_pool
   capacity = each.value.disk_gb * 1024 * 1024 * 1024
 
@@ -13,7 +13,7 @@ resource "libvirt_volume" "vm_disk_20g" {
 
   create = {
     content = {
-      url = abspath("${path.module}/../images/ubuntu-noble-20g.qcow2")
+      url = abspath("${path.module}/../images/ubuntu-noble-60g.qcow2")
     }
   }
 }

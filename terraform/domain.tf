@@ -39,7 +39,7 @@ resource "libvirt_domain" "vm" {
 
         source = {
           file = {
-            file = libvirt_volume.vm_disk_20g[each.key].path
+            file = libvirt_volume.vm_disk_60g[each.key].path
           }
         }
 

@@ -23,10 +23,6 @@ variable "network_name" {
   type        = string
 }
 
-variable "base_image_path" {
-  description = "Chemin de l'image Ubuntu Cloud source"
-  type        = string
-}
 
 variable "ssh_username" {
   description = "Utilisateur Linux commun aux VM"
